@@ -1,0 +1,33 @@
+cache:
+  backend: redis
+  enabled: true
+  redis_url: redis://localhost:6379/0
+  similarity_threshold: 0.92
+  ttl_seconds: 300
+circuit_breaker:
+  failure_threshold: 3
+  reset_timeout_seconds: 2
+  success_threshold: 1
+load_test:
+  requests: 100
+providers:
+- base_latency_ms: 180
+  cost_per_1k_tokens: 0.01
+  fail_rate: 0.25
+  name: primary
+- base_latency_ms: 260
+  cost_per_1k_tokens: 0.006
+  fail_rate: 0.05
+  name: backup
+scenarios:
+- description: "Primary provider fails 100% \u2014 all traffic should fallback"
+  name: primary_timeout_100
+  provider_overrides:
+    primary: 1.0
+- description: "Primary provider fails 50% \u2014 circuit should oscillate"
+  name: primary_flaky_50
+  provider_overrides:
+    primary: 0.5
+- description: "Baseline \u2014 both providers healthy"
+  name: all_healthy
+  provider_overrides: {}

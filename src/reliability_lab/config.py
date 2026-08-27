@@ -30,6 +30,7 @@ class CacheConfig(BaseModel):
 
 class LoadTestConfig(BaseModel):
     requests: int = Field(gt=0)
+    concurrency: int = Field(default=1, ge=1)
 
 
 class ScenarioConfig(BaseModel):
@@ -43,6 +44,8 @@ class LabConfig(BaseModel):
     circuit_breaker: CircuitBreakerConfig
     cache: CacheConfig
     load_test: LoadTestConfig
+    # None deliberately disables budget-aware routing for backwards compatibility.
+    cost_budget: float | None = Field(default=None, gt=0)
     scenarios: list[ScenarioConfig] = Field(default_factory=list)
 
 

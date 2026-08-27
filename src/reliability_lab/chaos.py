@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import random
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from reliability_lab.cache import ResponseCache, SharedRedisCache
 from reliability_lab.circuit_breaker import CircuitBreaker
 from reliability_lab.config import LabConfig, ScenarioConfig
-from reliability_lab.gateway import ReliabilityGateway
+from reliability_lab.gateway import GatewayResponse, ReliabilityGateway
 from reliability_lab.metrics import RunMetrics
 from reliability_lab.providers import FakeLLMProvider
 
@@ -45,7 +47,7 @@ def build_gateway(config: LabConfig, provider_overrides: dict[str, float] | None
             )
         else:
             cache = ResponseCache(config.cache.ttl_seconds, config.cache.similarity_threshold)
-    return ReliabilityGateway(providers, breakers, cache)
+    return ReliabilityGateway(providers, breakers, cache, config.cost_budget)
 
 
 def calculate_recovery_time_ms(gateway: ReliabilityGateway) -> float | None:
@@ -62,7 +64,16 @@ def calculate_recovery_time_ms(gateway: ReliabilityGateway) -> float | None:
     Each transition_log entry is a dict with keys: "from", "to", "reason", "ts"
     where "ts" is time.time() (epoch seconds).
     """
-    raise NotImplementedError("TODO: implement calculate_recovery_time_ms()")
+    recovery_times: list[float] = []
+    for breaker in gateway.breakers.values():
+        opened_at: float | None = None
+        for transition in breaker.transition_log:
+            if transition["to"] == "open":
+                opened_at = float(transition["ts"])
+            elif transition["to"] == "closed" and opened_at is not None:
+                recovery_times.append((float(transition["ts"]) - opened_at) * 1000)
+                opened_at = None
+    return sum(recovery_times) / len(recovery_times) if recovery_times else None
 
 
 def run_scenario(config: LabConfig, queries: list[str], scenario: ScenarioConfig) -> RunMetrics:
@@ -86,7 +97,53 @@ def run_scenario(config: LabConfig, queries: list[str], scenario: ScenarioConfig
     5. Set recovery_time_ms via calculate_recovery_time_ms(gateway)
     6. Return metrics
     """
-    raise NotImplementedError("TODO: implement run_scenario()")
+    gateway = build_gateway(config, scenario.provider_overrides or None)
+    metrics = RunMetrics()
+
+    def execute_request() -> tuple[GatewayResponse, float]:
+        prompt = random.choice(queries)
+        started = time.perf_counter()
+        result = gateway.complete(prompt)
+        return result, (time.perf_counter() - started) * 1000
+
+    if config.load_test.concurrency == 1:
+        request_results = (execute_request() for _ in range(config.load_test.requests))
+        for result, elapsed_ms in request_results:
+            _record_result(metrics, result, elapsed_ms)
+    else:
+        with ThreadPoolExecutor(max_workers=config.load_test.concurrency) as executor:
+            futures = [executor.submit(execute_request) for _ in range(config.load_test.requests)]
+            for future in futures:
+                result, elapsed_ms = future.result()
+                _record_result(metrics, result, elapsed_ms)
+
+    metrics.circuit_open_count = sum(
+        1
+        for breaker in gateway.breakers.values()
+        for transition in breaker.transition_log
+        if transition["to"] == "open"
+    )
+    metrics.recovery_time_ms = calculate_recovery_time_ms(gateway)
+    return metrics
+
+
+def _record_result(metrics: RunMetrics, result: GatewayResponse, elapsed_ms: float) -> None:
+    """Record one gateway result; kept separate so sequential and concurrent runs match."""
+    metrics.total_requests += 1
+    metrics.estimated_cost += result.estimated_cost
+    if result.cache_hit:
+        metrics.cache_hits += 1
+        metrics.estimated_cost_saved += 0.001
+    if result.route == "fallback":
+        metrics.fallback_successes += 1
+        metrics.successful_requests += 1
+    elif result.route == "static_fallback":
+        metrics.static_fallbacks += 1
+        metrics.failed_requests += 1
+    else:
+        metrics.successful_requests += 1
+    if result.latency_ms > 0:
+        metrics.latencies_ms.append(elapsed_ms)
 
 
 def run_simulation(config: LabConfig, queries: list[str]) -> RunMetrics:
