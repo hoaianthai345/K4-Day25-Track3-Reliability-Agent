@@ -19,6 +19,11 @@ cache:
   redis_url: "redis://localhost:6379/0"
 load_test:
   requests: 100
+  concurrency: 1
+
+# Optional cumulative provider-cost budget for one gateway/scenario run.
+# Omit or set to null to preserve the normal provider chain.
+cost_budget: null
 
 # Chaos scenarios: each overrides provider fail_rate for targeted testing.
 # TODO(student): Add more scenarios or tweak these.
